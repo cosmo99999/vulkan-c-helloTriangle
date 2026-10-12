@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <cglm/cglm.h>
+#include <cglm/io.h>
 #include <cglm/struct.h>
 #include <cglm/struct/affine-pre.h>
 #include <cglm/struct/affine.h>
@@ -8,7 +9,6 @@
 #include <cglm/struct/mat4.h>
 #include <cglm/util.h>
 #include <inttypes.h>
-#define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -125,6 +125,7 @@ uint32_t indices[] = {
     0, 2, 4, // side face: apex, -Y, -X
     0, 4, 1, // side face: apex, -X, +Y
 };
+
 typedef struct {
   VkVertexInputAttributeDescription *attribs;
   int count;
@@ -199,6 +200,8 @@ typedef struct {
   VkDeviceMemory depthImageMemory;
   VkImageView depthImageView;
   float lastTime;
+  VkImage textureImage;
+  VkDeviceMemory textureImageMemory;
 } App;
 
 App *app;
@@ -245,10 +248,16 @@ typedef struct {
   bool isSetGraphicsFamily;
   bool isSetPresentFamily;
 } QueueFamilyIndices;
+
 typedef struct {
   VkBuffer buffer;
   VkDeviceMemory memory;
-} Create_Buffer_Return_Object;
+} Create_Buffer;
+
+typedef struct {
+  VkImage image;
+  VkDeviceMemory memory;
+} Create_Image;
 
 QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
   QueueFamilyIndices indices = {.isSetGraphicsFamily = false};
@@ -396,8 +405,7 @@ uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
   throw("unable to find suitable device memory\n");
   return 0;
 }
-Create_Buffer_Return_Object createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                                         VkMemoryPropertyFlags properties) {
+Create_Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties) {
   VkBufferCreateInfo bufferInfo = {0};
   bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferInfo.size = size;
@@ -419,9 +427,43 @@ Create_Buffer_Return_Object createBuffer(VkDeviceSize size, VkBufferUsageFlags u
 
   vkBindBufferMemory(app->device, buffer, deviceMemory, 0);
 
-  Create_Buffer_Return_Object result;
+  Create_Buffer result;
   result.buffer = buffer;
   result.memory = deviceMemory;
+  return result;
+}
+Create_Image createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties){
+
+  VkImageCreateInfo imageInfo = {0};
+  imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  imageInfo.imageType = VK_IMAGE_TYPE_2D;
+  imageInfo.format = format;
+  imageInfo.extent = (VkExtent3D){width, height, 1};
+  imageInfo.mipLevels = 1;
+  imageInfo. arrayLayers = 1;
+  imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  imageInfo.usage = usage;
+  imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  
+  VkImage image = {0};
+  vkCreateImage(app->device, &imageInfo, VK_NULL_HANDLE, &image);
+  
+  VkMemoryRequirements memRequirements = {0};
+  vkGetImageMemoryRequirements(app->device, image, &memRequirements);
+
+  VkMemoryAllocateInfo allocInfo = {0};
+  allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  allocInfo.allocationSize = memRequirements.size;
+  allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+  VkDeviceMemory imageMemory = {0};
+  vkAllocateMemory(app->device, &allocInfo, VK_NULL_HANDLE, &imageMemory);
+
+  vkBindImageMemory(app->device, image, imageMemory, 0);
+
+  Create_Image result;
+  result.image = image;
+  result.memory = imageMemory;
   return result;
 }
 VkFormat findSupportedFormat(VkFormat *candidates, uint32_t candidateCount, VkImageTiling tiling,
@@ -441,6 +483,40 @@ VkFormat findDepthFormat() {
   VkFormat candidates[3] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT};
   return findSupportedFormat(candidates, 3, VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
 }
+VkCommandBuffer beginSingleTimeCommands(){
+  VkCommandBufferAllocateInfo allocInfo = {0};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.commandPool = app->commandPool;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandBufferCount = 1;
+
+  VkCommandBuffer result = {0};
+  vkAllocateCommandBuffers(app->device, &allocInfo, &result);
+
+  VkCommandBufferBeginInfo beginInfo = {0};
+  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+  vkBeginCommandBuffer(result, &beginInfo);
+
+  return result;
+}
+void endSingleTimeCommands(VkCommandBuffer *commandBuffer){
+  vkEndCommandBuffer(*commandBuffer);
+  
+  VkSubmitInfo submitInfo = {0};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = commandBuffer;
+
+  vkQueueSubmit(app->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+  vkQueueWaitIdle(app->graphicsQueue);
+  vkFreeCommandBuffers(app->device, app->commandPool, 1, commandBuffer);
+}
+void transitionImageLayout(VkCommandBuffer *commandBuffer, VkImage* image, VkImageLayout oldLayout, VkImageLayout newLayout){
+
+}
+
 void initWindow() {
   glfwInit();
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -448,6 +524,7 @@ void initWindow() {
   app->window = glfwCreateWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "VulkanApp", NULL, NULL);
   glfwSetFramebufferSizeCallback(app->window, framebufferResizeCallback);
 }
+
 void createSurface() {
   if (glfwCreateWindowSurface(app->instance, app->window, NULL, &app->surface) != VK_SUCCESS) {
     throw("failed to create surface\n");
@@ -774,42 +851,20 @@ void createCommandBuffers() {
   vkAllocateCommandBuffers(app->device, &allocInfo, app->commandBuffers);
 }
 void copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
-  VkCommandBufferAllocateInfo bufferInfo = {0};
-  bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-  bufferInfo.commandPool = app->commandPool;
-  bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  bufferInfo.commandBufferCount = 1;
-
-  VkCommandBuffer copyCommandBuffer = {0};
-  vkAllocateCommandBuffers(app->device, &bufferInfo, &copyCommandBuffer);
-  VkCommandBufferBeginInfo beginInfo;
-  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-  vkBeginCommandBuffer(copyCommandBuffer, &beginInfo);
+  VkCommandBuffer copyCommandBuffer = beginSingleTimeCommands();
 
   VkBufferCopy copyRegion = {0};
   copyRegion.size = size;
   copyRegion.srcOffset = 0;
   copyRegion.dstOffset = 0;
-
   vkCmdCopyBuffer(copyCommandBuffer, src, dst, 1, &copyRegion);
-
   vkEndCommandBuffer(copyCommandBuffer);
 
-  VkSubmitInfo submitInfo;
-  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submitInfo.commandBufferCount = 1;
-  submitInfo.pCommandBuffers = &copyCommandBuffer;
-
-  vkQueueSubmit(app->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-  vkQueueWaitIdle(app->graphicsQueue);
-
-  vkFreeCommandBuffers(app->device, app->commandPool, 1, &copyCommandBuffer);
+  endSingleTimeCommands(copyCommandBuffer);
 }
 void createVertexBuffer() {
   VkDeviceSize allocSize = sizeof(vertices[0]) * 5;
-  Create_Buffer_Return_Object stagingBuffer =
+  Create_Buffer stagingBuffer =
       createBuffer(allocSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
@@ -818,7 +873,7 @@ void createVertexBuffer() {
   memcpy(data, vertices, allocSize);
   vkUnmapMemory(app->device, stagingBuffer.memory);
 
-  Create_Buffer_Return_Object vertexBuffer =
+  Create_Buffer vertexBuffer =
       createBuffer(allocSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   copyBuffer(stagingBuffer.buffer, vertexBuffer.buffer, allocSize);
@@ -827,7 +882,7 @@ void createVertexBuffer() {
 }
 void createIndexBuffer() {
   VkDeviceSize bufferSize = sizeof(indices);
-  Create_Buffer_Return_Object stagingBuffer =
+  Create_Buffer stagingBuffer =
       createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
   void *data;
@@ -835,7 +890,7 @@ void createIndexBuffer() {
   memcpy(data, indices, bufferSize);
   vkUnmapMemory(app->device, stagingBuffer.memory);
 
-  Create_Buffer_Return_Object indexBuffer =
+  Create_Buffer indexBuffer =
       createBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   copyBuffer(stagingBuffer.buffer, indexBuffer.buffer, bufferSize);
@@ -845,18 +900,31 @@ void createIndexBuffer() {
 void createTextureImage() {
   int texWidth, texHeight, texChannels;
   stbi_uc *pixels = stbi_load("textures.texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+  VkDeviceSize imageSize = texWidth * texHeight * 4;
   if (!pixels) {
     throw("failed to load texture image\n");
   }
+  Create_Buffer stagingBuffer =
+      createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+  void *data;
+  vkMapMemory(app->device, stagingBuffer.memory, 0, imageSize, 0, &data);
+  memcpy(data, pixels, imageSize);
+  vkUnmapMemory(app->device, stagingBuffer.memory);
+  stbi_image_free(pixels);
+
+  Create_Image image = createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, 
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+
 }
 void createDepthResources() { VkFormat depthFormat = findDepthFormat(); }
 void createUniformBuffers() {
   app->uniformBuffersCount = FRAMES_IN_FLIGHT;
   for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
-    Create_Buffer_Return_Object buffer =
-        createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    Create_Buffer buffer = createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     vkMapMemory(app->device, buffer.memory, 0, bufferSize, 0, &app->uniformBuffersMapped[i]);
     app->uniformBuffers[i] = buffer.buffer;
     app->uniformBufferMemory[i] = buffer.memory;
